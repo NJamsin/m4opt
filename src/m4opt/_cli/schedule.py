@@ -1,7 +1,7 @@
 import shlex
 import sys
 from itertools import pairwise
-from typing import Annotated
+from typing import Annotated, Optional
 
 import numpy as np
 import synphot
@@ -83,6 +83,10 @@ def prepare_piecewise_breakpoints(breakpoints):
         breakpoints = breakpoints[: isinf_indices[0]]
     return [tuple(col.item() for col in row) for row in breakpoints]
 
+def parse_field_idx(value: Optional[str]) -> Optional[list[int]]:
+    if value is None:
+        return None
+    return [int(v) for v in value.replace(",", " ").split()]
 
 @app.command()
 @progress()
@@ -114,6 +118,12 @@ def schedule(
             help="Name of sky grid to use, if the mission supports multiple sky grids.",
         ),
     ] = None,
+    field_idx: Annotated[
+            Optional[str],
+            typer.Option(
+                help='Restrict the schedule to these field IDs, e.g. "466,517,518" or "466 517 518".',
+            ),
+        ] = None,
     event_time: Annotated[
         Time | None,
         typer.Option(
@@ -272,6 +282,8 @@ def schedule(
     """
     adaptive_exptime = absmag_mean is not None
 
+    field_idx = parse_field_idx(field_idx)
+
     # Successive visits cycle through the requested bandpasses, so that
     # --bandpass g --bandpass r over three visits gives g, r, g.
     visit_bandpasses = [
@@ -356,6 +368,13 @@ def schedule(
         observable_intervals = observable_intervals[good]
         target_coords = target_coords[good]
         field_ids = field_ids[good]
+
+        # restrict to the requested field IDs, if any
+        if field_idx is not None:
+            field_mask = np.isin(field_ids, field_idx)
+            target_coords = target_coords[field_mask]
+            field_ids = field_ids[field_mask]
+            observable_intervals = observable_intervals[field_mask]
 
     with status("calculating footprints"):
         if isinstance(mission.observer_location, EarthFixedObserverLocation):
