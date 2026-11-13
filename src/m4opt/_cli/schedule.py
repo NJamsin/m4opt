@@ -1,7 +1,7 @@
 import shlex
 import sys
 from itertools import pairwise
-from typing import Annotated, Optional
+from typing import Annotated
 
 import numpy as np
 import synphot
@@ -83,10 +83,12 @@ def prepare_piecewise_breakpoints(breakpoints):
         breakpoints = breakpoints[: isinf_indices[0]]
     return [tuple(col.item() for col in row) for row in breakpoints]
 
-def parse_field_idx(value: Optional[str]) -> Optional[list[int]]:
+
+def parse_field_idx(value: str | None) -> list[int] | None:
     if value is None:
         return None
     return [int(v) for v in value.replace(",", " ").split()]
+
 
 @app.command()
 @progress()
@@ -119,11 +121,11 @@ def schedule(
         ),
     ] = None,
     field_idx: Annotated[
-            Optional[str],
-            typer.Option(
-                help='Restrict the schedule to these field IDs, e.g. "466,517,518" or "466 517 518".',
-            ),
-        ] = None,
+        str | None,
+        typer.Option(
+            help='Restrict the schedule to these field IDs, e.g. "466,517,518" or "466 517 518".',
+        ),
+    ] = None,
     event_time: Annotated[
         Time | None,
         typer.Option(
