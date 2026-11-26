@@ -65,6 +65,7 @@ distribute-*.tar.gz
 .settings
 pip-wheel-metadata/
 .tmp
+**/_toy*
 
 # Mac OSX
 .DS_Store

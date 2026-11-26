@@ -2,7 +2,7 @@ import heapq
 import shlex
 import sys
 from itertools import pairwise
-from typing import Annotated
+from typing import Annotated, Literal
 from pathlib import Path
 
 import numpy as np
@@ -298,7 +298,7 @@ def schedule_multi(
             "Visits are grouped into contiguous blocks of a single bandpass so "
             "that the filter is exchanged only between blocks."
         ),
-    ] = ['r'], # must be changed to have per facility filter !
+    ] = None, # must be changed to have per facility filter !
     visits: Annotated[int, typer.Option(min=1, help="Number of visits")] = 1,
     cadence: Annotated[
         PhysicalQuantity[u.physical.time],
@@ -313,14 +313,23 @@ def schedule_multi(
             "it grows the problem roughly quadratically",
         ),
     ] = 50,
+    preselection_method: Annotated[
+        Literal["pixel", "tile"],
+        typer.Option(
+            help="Method to use for the preselection of observables tiles to schedule:"
+            "Possible options are \"pixel\" or \"tile\""
+            "`pixel`: Preselection is done jointly and avoid recounting a pixel's probability more than once - more adapted to a fixed exposure time. (can lead to small gaps in the coverage)"
+            "`tile`: Preselection is done by selectionning the most probable tile for each telescopes independantly - more adapted to an adaptive exposure time."
+        ),
+    ]="pixel",
     overlap_weight: Annotated[
         float,
         typer.Option(
             min=0,
             max=1,
-            help="Weight for the overlap term in the objective function. 0=no overlap, 1=recount each pixel when preselecting the most probable fields",
+            help="Weight for the overlap term in the objective function. 0=no overlap, 1=recount each pixel when preselecting the most probable fields, only used for the pixel method",
         ),
-    ] = 0.75,
+    ] = 1,
     timelimit: Annotated[
         PhysicalQuantity[u.physical.time],
         typer.Option(
@@ -376,7 +385,7 @@ def schedule_multi(
             "--mission-names",
             help="Mission to include in the joint schedule. Repeat for each mission.",
         ),
-    ] = ["rubin", "ztf"],
+    ] = None,
     write_candidates: Annotated[
         str | None,
         typer.Option(
@@ -432,7 +441,7 @@ def schedule_multi(
         raise NotImplementedError(
             "A variable exposure time is not supported with more than one bandpass."
         )
-    filter_changes = [lhs != rhs for lhs, rhs in pairwise(visit_bandpasses)]
+    #filter_changes = [lhs != rhs for lhs, rhs in pairwise(visit_bandpasses)] # not usable for now 
 
     with status("loading sky map"):
         hpx = HEALPix(nside, frame=ICRS(), order="nested")
@@ -535,51 +544,92 @@ def schedule_multi(
             footprints[mission] = footprint_healpix(hpx, missions[mission].fov, target_coords[mission], rolls[mission])
             all_footprints[mission] = footprints[mission]
 
-        pix_prob = np.asarray(skymap_flat_full["PROB"])
-        counts = np.zeros(len(pix_prob), dtype=np.int32)
+        if preselection_method == "tile":
+            # use the same "tile" approach as the default `schedule`
+            for mission in missions:
+                n_fields[mission] = max_fields
+                if len(target_coords[mission]) > n_fields[mission]:
+                    good = np.argpartition(
+                        [-skymap_flat_full[footprint]["PROB"].sum() for footprint in footprints[mission]],
+                        n_fields[mission],
+                    )[:n_fields[mission]]
+                    target_coords[mission] = target_coords[mission][good]
+                    rolls[mission] = rolls[mission][good]
+                    footprints[mission] = footprints[mission][good]
+                    observable_intervals[mission] = observable_intervals[mission][good]
+                    field_ids[mission] = field_ids[mission][good]
+                else:
+                    n_fields[mission] = len(target_coords[mission])
+        else: # pixel approach
+            pix_prob = np.asarray(skymap_flat_full["PROB"])
+            counts = np.zeros(len(pix_prob), dtype=np.int32)
+            mask = np.zeros(len(pix_prob), dtype=bool)    # buffer used for tile erosion
+            edgeness = np.zeros(len(pix_prob), dtype=np.float32)
 
-        selected = {mission: [] for mission in missions.keys()}
+            selected = {mission: [] for mission in missions.keys()}
 
-        def marginal_gain(fp):
-            fp = np.asarray(fp)
-            p = pix_prob[fp]
-            is_new = counts[fp] == 0
-            return p[is_new].sum() + overlap_weight * p[~is_new].sum() 
+            def tile_edgeness(fp, rim_frac):
+                """Trim the edges of a tile to allow for a smart(er) overlap weight"""
+                fp = np.asarray(fp)
+                rim_px = max(1, int(rim_frac * np.sqrt(len(fp))))   # scale acordingly to the used mission & skymap
+                nb = hp.get_all_neighbours(nside, fp, nest=True)    # focus on neighboring pixels: try to fill the gaps
+                valid = nb >= 0
+                mask[fp] = True
+                depth = np.full(len(fp), rim_px, dtype=np.int16)
+                alive = np.ones(len(fp), dtype=bool)
+                for k in range(rim_px):
+                    inside = mask[np.where(valid, nb, 0)] & valid
+                    edge = alive & ~inside.all(axis=0)              # a un voisin hors tuile
+                    if not edge.any():
+                        break
+                    depth[edge] = k
+                    alive &= ~edge
+                    mask[fp[edge]] = False                          # on rogne une couche
+                mask[fp] = False
+                return np.clip(1 - depth / rim_px, 0, 1).astype(np.float32)
 
-        heap = []
-        for mission in missions.keys():
-            for i, fp in enumerate(footprints[mission]):
-                heapq.heappush(heap, (-marginal_gain(fp), mission, i)) 
+            def marginal_gain(fp):
+                fp = np.asarray(fp)
+                p, old = pix_prob[fp], counts[fp] > 0
+                return p[~old].sum() + overlap_weight * (p[old] * edgeness[fp[old]]).sum()
 
-        n_covered_version = 0                      
-        gain_version = {}                          
-        full = set()        
+            heap = []
+            for mission in missions.keys():
+                for i, fp in enumerate(footprints[mission]):
+                    heapq.heappush(heap, (-marginal_gain(fp), mission, i)) 
 
-        while heap and len(full) < len(missions):
-            neg_gain, mission, i = heapq.heappop(heap)
-            if mission in full:
-                continue
-            if gain_version.get((mission, i), -1) != n_covered_version:
-                gain_version[(mission, i)] = n_covered_version
-                heapq.heappush(heap, (-marginal_gain(footprints[mission][i]), mission, i))
-                continue
-            if -neg_gain <= 0:
-                break                            
-            selected[mission].append(i)
-            counts[np.asarray(footprints[mission][i])] += 1
-            n_covered_version += 1
-            if len(selected[mission]) >= max_fields:
-                full.add(mission)
-        print(f"Found best fields after {n_covered_version} iterations, covering {np.count_nonzero(counts)} pixels")
-        for mission in missions.keys():
-            good = np.array(sorted(selected[mission]), dtype=int)
-            n_fields[mission] = len(good)
-            target_coords[mission] = target_coords[mission][good]
-            rolls[mission] = rolls[mission][good]
-            footprints[mission] = footprints[mission][good]
-            observable_intervals[mission] = observable_intervals[mission][good]
-            field_ids[mission] = field_ids[mission][good]
+            n_covered_version = 0                      
+            gain_version = {}                          
+            full = set()        
 
+            while heap and len(full) < len(missions):
+                neg_gain, mission, i = heapq.heappop(heap)
+                if mission in full:
+                    continue
+                if gain_version.get((mission, i), -1) != n_covered_version:
+                    gain_version[(mission, i)] = n_covered_version
+                    heapq.heappush(heap, (-marginal_gain(footprints[mission][i]), mission, i))
+                    continue
+                if -neg_gain <= 0:
+                    break                            
+                selected[mission].append(i)
+                fp_sel = np.asarray(footprints[mission][i])
+                e = tile_edgeness(fp_sel, rim_frac=0.15)
+                edgeness[fp_sel] = np.where(counts[fp_sel] == 0, e, np.minimum(edgeness[fp_sel], e))
+                counts[fp_sel] += 1
+                n_covered_version += 1
+                if len(selected[mission]) >= max_fields:
+                    full.add(mission)
+            print(f"Found best fields after {n_covered_version} iterations, covering {np.count_nonzero(counts)} pixels")
+            for mission in missions.keys():
+                good = np.array(sorted(selected[mission]), dtype=int)
+                n_fields[mission] = len(good)
+                target_coords[mission] = target_coords[mission][good]
+                rolls[mission] = rolls[mission][good]
+                footprints[mission] = footprints[mission][good]
+                observable_intervals[mission] = observable_intervals[mission][good]
+                field_ids[mission] = field_ids[mission][good]
+        for mission in missions:
             # save the candidates footprint for a later use
             if write_candidates is not None:
                 write_candidates_mission = f"{write_candidates}_{mission}.npz"
