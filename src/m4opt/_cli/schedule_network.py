@@ -513,9 +513,9 @@ def schedule_network(
         typer.Option(
             "--network",
             help="Network of telescopes to use for the scheduler.",
-            show_default="tarot",
+            show_default="ground",
         ),
-    ] = net.tarot,
+    ] = net.ground,
     write_candidates: Annotated[
         str | None,
         typer.Option(
