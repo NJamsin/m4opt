@@ -2,10 +2,10 @@ import numpy as np
 import pytest
 from astropy import units as u
 
-from .. import ultrasat, uvex, ztf
+from .. import tca, tch, tre, ultrasat, uvex, ztf
 
 
-@pytest.mark.parametrize("mission", [ztf, uvex, ultrasat])
+@pytest.mark.parametrize("mission", [ztf, uvex, ultrasat, tre, tca, tch])
 def test_skygrid_spans_the_sky(mission):
     """Reference pointings cover the full range of right ascension."""
     grids = (

@@ -5,6 +5,9 @@ from ._rubin import rubin
 from ._ultrasat import ultrasat
 from ._uvex import uvex, uvex_downlink_orientation, uvex_lss_fov
 from ._ztf import ztf
+from ._tca import tca
+from ._tch import tch
+from ._tre import tre
 
 __all__ = (
     "Mission",
@@ -14,4 +17,7 @@ __all__ = (
     "uvex_downlink_orientation",
     "uvex_lss_fov",
     "ztf",
+    "tca",
+    "tch",
+    "tre",
 )

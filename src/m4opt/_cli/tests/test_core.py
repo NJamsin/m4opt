@@ -121,6 +121,11 @@ def test_mission(run_cli):
     assert result.exit_code == 0
     assert value == missions.ultrasat
 
+    for name in ("tre", "tca", "tch"):
+        result, value = run(f"--foo={name}")
+        assert result.exit_code == 0
+        assert value is getattr(missions, name)
+
     result, value = run("--foo=bar")
     assert result.exit_code != 0
     assert "'bar' is not one of" in result.output
